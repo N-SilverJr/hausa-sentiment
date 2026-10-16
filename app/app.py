@@ -20,7 +20,14 @@ import joblib
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent if (HERE.parent / "models").exists() else HERE
+# Space layout: app.py at repo root, models/ next to it.
+# Local package layout: app/app.py with models/ one level up.
+if (HERE / "models").exists():
+    ROOT = HERE
+elif (HERE.parent / "models").exists():
+    ROOT = HERE.parent
+else:
+    ROOT = HERE
 MODELS = ROOT / "models"
 
 if str(ROOT) not in sys.path:
@@ -338,4 +345,4 @@ with gr.Blocks(title="Hausa Sentiment") as demo:
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port, ssr_mode=False)
+    demo.launch(server_name="0.0.0.0", server_port=port, ssr_mode=False, show_error=True)
