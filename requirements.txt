@@ -1,0 +1,7 @@
+gradio>=4.0,<5
+scikit-learn
+joblib
+numpy
+# CPU-only PyTorch (smaller than default CUDA wheels)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
