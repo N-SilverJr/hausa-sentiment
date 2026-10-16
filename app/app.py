@@ -344,6 +344,15 @@ with gr.Blocks(title="Hausa Sentiment") as demo:
     gr.Examples(EXAMPLES, inputs=box)
 
 if __name__ == "__main__":
+    import gradio.networking as _networking
+    # Render does not expose localhost the way Gradio expects
+    _networking.url_ok = lambda *args, **kwargs: True
+
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port, show_error=True)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=port,
+        share=False,
+        show_error=True,
+    )
 
