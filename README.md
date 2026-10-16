@@ -24,6 +24,7 @@ This is a clean, notebook-first package modelled on a lightweight project templa
 ```
 hausa-sentiment/
 ├── README.md
+├── classical_model.py                              # needed to unpickle classical_best.pkl
 ├── notebooks/
 │   ├── sentiment-classification.ipynb              # main end-to-end notebook
 │   └── sentiment-classification-error-analysis.ipynb
@@ -34,12 +35,16 @@ hausa-sentiment/
 │   ├── requirements.txt
 │   └── README.md
 ├── data/processed/
-│   └── afrisenti_hau_train.csv                     # 14 172 training rows
+│   ├── afrisenti_hau_train.csv                     # 14 172
+│   ├── afrisenti_hau_dev.csv                       #  2 677
+│   ├── afrisenti_hau_dev_noleak.csv                #  2 462 (leakage removed)
+│   └── afrisenti_hau_test.csv                      #  5 303
 ├── models/
 │   ├── classical_best.pkl                          # best classical model
 │   ├── rnn_R7_BiLSTM_attention_pooling.pt          # best recurrent model
 │   ├── rnn_R1 … R6 *.pt
-│   └── transformer_T1_afro-xlmr-mini_LoRA_(CPU)/   # LoRA adapter + tokenizer
+│   ├── transformer_T1_afro-xlmr-mini_LoRA_(CPU)/   # main LoRA (test F1 0.590)
+│   └── transformer_SMOKE_afro-xlmr-mini_lora/      # smoke test only (test F1 0.314)
 └── results/
     └── experiments.json                            # full experiment registry
 ```
@@ -127,7 +132,7 @@ The classical model is the system shipped in the web app.
 - Experiment registry: `results/experiments.json` (single source of truth for reported scores).
 - Classical inference does not require GPU or internet.
 - Transformer second opinion requires `torch`, `transformers`, `peft` and will download the base model `Davlan/afro-xlmr-mini` on first use if not cached.
-- Dev / test CSVs are not yet in this clean package; evaluation numbers are taken from the registry. They can be re-added when available.
+- All train / dev / dev_noleak / test CSVs are included under `data/processed/`.
 
 ---
 
