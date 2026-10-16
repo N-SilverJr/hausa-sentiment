@@ -313,7 +313,7 @@ Classifies Hausa social-media text as **positive**, **neutral** or **negative**.
 - **Transformer:** AfroXLMR-mini LoRA (test macro-F1 **0.590**) when files and libraries are present
 - Emoji and Hausa hooked letters are kept; links and @mentions are normalised
 - Sarcasm and subtle negation are not handled reliably
-- Trained on Hausa tweets â€” English or formal news prose may mislead the models
+- Trained on Hausa tweets ” English or formal news prose may mislead the models
 """
 
 EXAMPLES = [
