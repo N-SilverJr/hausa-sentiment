@@ -1,18 +1,17 @@
 """
 Hausa tweet sentiment – Gradio demo.
 
-Primary model: word + character TF-IDF + calibrated LinearSVC (test macro-F1 0.782).
-Optional second opinion: AfroXLMR-mini LoRA adapter (if the files and libraries are available).
-
-Preprocessing mirrors the original pipeline:
-  Unicode NFC → strip control chars → URL → <url> → @mention → @user → collapse whitespace.
-For the classical bag-of-words model the placeholders @user and <url> are then removed.
+Models:
+  1. Classical (main): word + character TF-IDF + calibrated LinearSVC (test macro-F1 0.782)
+  2. Recurrent: BiLSTM + attention pooling, Word2Vec mixed (test macro-F1 0.746)
+  3. Transformer (optional): AfroXLMR-mini LoRA T1 (test macro-F1 0.590) when files + libs exist
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 import unicodedata
 from pathlib import Path
 
@@ -20,24 +19,21 @@ import gradio as gr
 import joblib
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Paths – work both when the app is run from the repo root and from app/
-# ---------------------------------------------------------------------------
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent if (HERE.parent / "models").exists() else HERE
 MODELS = ROOT / "models"
 
-# Allow unpickling of the custom UnionVectorizer saved with the classical model
-import sys
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
 CLASSICAL_PATH = MODELS / "classical_best.pkl"
+RNN_PATH = MODELS / "rnn_R7_BiLSTM_attention_pooling.pt"
 TRANSFORMER_DIR = MODELS / "transformer_T1_afro-xlmr-mini_LoRA_(CPU)"
 
 LABELS = ["positive", "neutral", "negative"]  # ids 0, 1, 2
 
 # ---------------------------------------------------------------------------
-# Preprocessing (same rules as the original project)
+# Preprocessing
 # ---------------------------------------------------------------------------
 URL_RE = re.compile(r"https?://\S+|www\.\S+", flags=re.IGNORECASE)
 MENTION_RE = re.compile(r"@\w+")
@@ -45,7 +41,6 @@ CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
 
 def clean_text(text: str) -> str:
-    """Full cleaning used by neural / transformer models."""
     if not isinstance(text, str):
         return ""
     t = unicodedata.normalize("NFC", text)
@@ -57,16 +52,19 @@ def clean_text(text: str) -> str:
 
 
 def text_bow(text: str) -> str:
-    """Classical bag-of-words view: placeholders stripped."""
     t = clean_text(text)
     t = t.replace("@user", " ").replace("<url>", " ")
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
 
-# ---------------------------------------------------------------------------
-# Lightweight domain warning (not a full language ID system)
-# ---------------------------------------------------------------------------
+def simple_tokenize(text: str) -> list[str]:
+    """Whitespace + light punctuation split used for the RNN vocabulary."""
+    t = clean_text(text).lower()
+    t = re.sub(r"([.,!?;:\"()\[\]{}])", r" \1 ", t)
+    return [tok for tok in t.split() if tok]
+
+
 HAUSA_MARKERS = {
     "da", "ne", "ce", "ba", "ko", "sai", "kuma", "amma", "wani", "wata",
     "nan", "can", "yana", "yake", "ake", "ana", "ina", "muna", "suna",
@@ -93,31 +91,25 @@ def domain_note(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Model loading (lazy, classical is required, transformer is optional)
+# Classical
 # ---------------------------------------------------------------------------
 _classical = None
-_tokenizer = None
-_transformer = None
-_transformer_ok = False
 
 
 def load_classical():
-    """Load the classical model dict {vectorizer, clf, ...}."""
     global _classical
     if _classical is None:
         if not CLASSICAL_PATH.exists():
             raise FileNotFoundError(f"Classical model not found at {CLASSICAL_PATH}")
-        import classical_model  # noqa: F401  – required for unpickling UnionVectorizer
+        import classical_model  # noqa: F401
         _classical = joblib.load(CLASSICAL_PATH)
     return _classical
 
 
-def classical_predict_proba(text_bow: str):
-    """Return probability vector [pos, neu, neg] for a single bow string."""
+def classical_predict_proba(bow: str) -> np.ndarray:
     bundle = load_classical()
-    vec = bundle["vectorizer"]
+    X = bundle["vectorizer"].transform([bow])
     clf = bundle["clf"]
-    X = vec.transform([text_bow])
     if hasattr(clf, "predict_proba"):
         return clf.predict_proba(X)[0]
     scores = clf.decision_function(X)[0]
@@ -125,8 +117,104 @@ def classical_predict_proba(text_bow: str):
     return exp / exp.sum()
 
 
-def try_load_transformer():
-    """Attempt to load the LoRA adapter. Failures are non-fatal."""
+# ---------------------------------------------------------------------------
+# Recurrent (BiLSTM + attention)
+# ---------------------------------------------------------------------------
+_rnn = None
+_rnn_word2id = None
+_rnn_max_len = 64
+
+
+def _build_rnn_module(config: dict, vocab_size: int):
+    import torch
+    import torch.nn as nn
+
+    emb_dim = int(config["emb_dim"])
+    hidden = int(config["hidden"])
+    num_layers = int(config.get("num_layers", 1))
+    dropout = float(config.get("dropout", 0.3))
+
+    class BiLSTMAttention(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding = nn.Embedding(vocab_size, emb_dim, padding_idx=0)
+            self.encoder = nn.LSTM(
+                emb_dim,
+                hidden,
+                num_layers=num_layers,
+                batch_first=True,
+                bidirectional=True,
+                dropout=dropout if num_layers > 1 else 0.0,
+            )
+            # state_dict: attn.0 (256->64), attn.2 (64->1)  → Sequential Linear, Tanh, Linear
+            self.attn = nn.Sequential(
+                nn.Linear(hidden * 2, 64),
+                nn.Tanh(),
+                nn.Linear(64, 1),
+            )
+            self.classifier = nn.Linear(hidden * 2, 3)
+
+        def forward(self, input_ids):
+            # input_ids: (B, T)
+            mask = (input_ids != 0).float()  # (B, T)
+            emb = self.embedding(input_ids)
+            out, _ = self.encoder(emb)  # (B, T, 2H)
+            scores = self.attn(out).squeeze(-1)  # (B, T)
+            scores = scores.masked_fill(mask == 0, -1e9)
+            weights = torch.softmax(scores, dim=-1).unsqueeze(-1)  # (B, T, 1)
+            pooled = (out * weights).sum(dim=1)  # (B, 2H)
+            return self.classifier(pooled)
+
+    return BiLSTMAttention()
+
+
+def load_rnn():
+    global _rnn, _rnn_word2id, _rnn_max_len
+    if _rnn is not None:
+        return _rnn
+    import torch
+
+    if not RNN_PATH.exists():
+        raise FileNotFoundError(f"RNN checkpoint not found at {RNN_PATH}")
+    ckpt = torch.load(RNN_PATH, map_location="cpu", weights_only=False)
+    config = ckpt["config"]
+    word2id = ckpt["word2id"]
+    model = _build_rnn_module(config, vocab_size=len(word2id))
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+    _rnn = model
+    _rnn_word2id = word2id
+    _rnn_max_len = int(ckpt.get("max_len", config.get("max_len", 64)))
+    return _rnn
+
+
+def rnn_predict_proba(text: str) -> np.ndarray:
+    import torch
+
+    model = load_rnn()
+    unk = _rnn_word2id.get("<unk>", 1)
+    ids = [_rnn_word2id.get(tok, unk) for tok in simple_tokenize(text)]
+    if not ids:
+        ids = [unk]
+    ids = ids[:_rnn_max_len]
+    if len(ids) < _rnn_max_len:
+        ids = ids + [0] * (_rnn_max_len - len(ids))
+    x = torch.tensor([ids], dtype=torch.long)
+    with torch.no_grad():
+        logits = model(x)[0]
+        probs = torch.softmax(logits, dim=-1).cpu().numpy()
+    return probs
+
+
+# ---------------------------------------------------------------------------
+# Transformer (optional)
+# ---------------------------------------------------------------------------
+_tokenizer = None
+_transformer = None
+_transformer_ok = False
+
+
+def try_load_transformer() -> bool:
     global _tokenizer, _transformer, _transformer_ok
     if _transformer_ok or _transformer is not None:
         return _transformer_ok
@@ -137,14 +225,12 @@ def try_load_transformer():
 
         base = "Davlan/afro-xlmr-mini"
         _tokenizer = AutoTokenizer.from_pretrained(str(TRANSFORMER_DIR))
-        base_model = AutoModelForSequenceClassification.from_pretrained(
-            base, num_labels=3
-        )
+        base_model = AutoModelForSequenceClassification.from_pretrained(base, num_labels=3)
         _transformer = PeftModel.from_pretrained(base_model, str(TRANSFORMER_DIR))
         _transformer.eval()
         _transformer_ok = True
     except Exception as exc:  # noqa: BLE001
-        print(f"[app] Transformer not loaded ({exc}). Classical model only.")
+        print(f"[app] Transformer not loaded ({exc}). Classical + RNN only.")
         _transformer_ok = False
     return _transformer_ok
 
@@ -153,44 +239,58 @@ def try_load_transformer():
 # Prediction
 # ---------------------------------------------------------------------------
 def predict(text: str):
+    empty = {}
     if not text or not text.strip():
-        return "Type or paste a Hausa tweet.", {}, {}
+        return "Type or paste a Hausa tweet.", empty, empty, empty
 
     bow = text_bow(text)
     if not bow:
-        return "Nothing left after cleaning (only links, mentions or symbols).", {}, {}
+        return "Nothing left after cleaning (only links, mentions or symbols).", empty, empty, empty
 
     note = domain_note(text)
-    prepared = f"Text the classical model saw: {bow}"
+    prepared = f"Text seen after cleaning: {bow}"
     if note:
-        prepared = prepared + "\n\n⚠ " + note
+        prepared += f"\n\n⚠ {note}"
 
-    # --- classical (always) ---
-    probs = classical_predict_proba(bow)
-    classical_out = {lab: float(p) for lab, p in zip(LABELS, probs)}
+    # Classical
+    c_probs = classical_predict_proba(bow)
+    classical_out = {lab: float(p) for lab, p in zip(LABELS, c_probs)}
+    c_lab = LABELS[int(np.argmax(c_probs))]
 
-    # --- optional transformer ---
+    # RNN
+    rnn_out = {}
+    try:
+        r_probs = rnn_predict_proba(text)
+        rnn_out = {lab: float(p) for lab, p in zip(LABELS, r_probs)}
+        r_lab = LABELS[int(np.argmax(r_probs))]
+    except Exception as exc:  # noqa: BLE001
+        prepared += f"\n(RNN not available: {exc})"
+        r_lab = None
+
+    # Transformer
     transformer_out = {}
+    t_lab = None
     if try_load_transformer():
         import torch
+
         clean = clean_text(text)
-        enc = _tokenizer(
-            clean, return_tensors="pt", truncation=True, max_length=64
-        )
+        enc = _tokenizer(clean, return_tensors="pt", truncation=True, max_length=64)
         with torch.no_grad():
             logits = _transformer(**enc).logits[0]
             tprobs = torch.softmax(logits, dim=-1).cpu().numpy()
         transformer_out = {lab: float(p) for lab, p in zip(LABELS, tprobs)}
-        c_lab = LABELS[int(np.argmax(probs))]
         t_lab = LABELS[int(np.argmax(tprobs))]
-        if c_lab == t_lab:
-            prepared += "\nBoth models agree."
-        else:
-            prepared += "\nThe models disagree. Treat this prediction as uncertain."
     else:
         prepared += "\n(Transformer second opinion not available in this environment.)"
 
-    return prepared, classical_out, transformer_out
+    # Agreement note
+    labels_seen = [x for x in (c_lab, r_lab, t_lab) if x is not None]
+    if len(set(labels_seen)) == 1 and len(labels_seen) > 1:
+        prepared += "\nAll loaded models agree."
+    elif len(set(labels_seen)) > 1:
+        prepared += "\nModels disagree — treat the prediction as uncertain."
+
+    return prepared, classical_out, rnn_out, transformer_out
 
 
 # ---------------------------------------------------------------------------
@@ -201,12 +301,12 @@ DESCRIPTION = """
 
 Classifies Hausa social-media text as **positive**, **neutral** or **negative**.
 
-- **Main model:** word + character TF-IDF + calibrated LinearSVC  
-  (test macro-F1 **0.782** on the official AfriSenti Hausa test set).
-- **Second opinion:** AfroXLMR-mini LoRA adapter (loaded when the files and libraries are present).
-- Emoji and Hausa hooked letters are kept; links and @mentions are normalised.
-- Sarcasm and subtle negation are not handled reliably.
-- The model was trained on Hausa tweets; English or formal news prose may give misleading results.
+- **Main model:** word + character TF-IDF + calibrated LinearSVC (test macro-F1 **0.782**)
+- **Recurrent:** BiLSTM + attention pooling (test macro-F1 **0.746**)
+- **Transformer:** AfroXLMR-mini LoRA (test macro-F1 **0.590**) when files and libraries are present
+- Emoji and Hausa hooked letters are kept; links and @mentions are normalised
+- Sarcasm and subtle negation are not handled reliably
+- Trained on Hausa tweets — English or formal news prose may mislead the models
 """
 
 EXAMPLES = [
@@ -215,7 +315,6 @@ EXAMPLES = [
     "Sai haquri fa yan madrid daman kunce champion din ya muku yawa",
     "MashaAllah Allah ya Kara daukaka darajar wanan Film",
 ]
-
 
 with gr.Blocks(title="Hausa Sentiment") as demo:
     gr.Markdown(DESCRIPTION)
@@ -227,9 +326,14 @@ with gr.Blocks(title="Hausa Sentiment") as demo:
     btn = gr.Button("Classify", variant="primary")
     info = gr.Textbox(label="Prepared text and notes", interactive=False)
     with gr.Row():
-        classical_label = gr.Label(label="Classical model (main)")
-        transformer_label = gr.Label(label="Transformer (second opinion)")
-    btn.click(predict, inputs=box, outputs=[info, classical_label, transformer_label])
+        classical_label = gr.Label(label="Classical model (main) — 0.782")
+        rnn_label = gr.Label(label="BiLSTM + attention — 0.746")
+        transformer_label = gr.Label(label="Transformer LoRA — 0.590")
+    btn.click(
+        predict,
+        inputs=box,
+        outputs=[info, classical_label, rnn_label, transformer_label],
+    )
     gr.Examples(EXAMPLES, inputs=box)
 
 if __name__ == "__main__":
