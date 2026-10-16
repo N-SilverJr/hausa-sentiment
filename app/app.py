@@ -1,5 +1,5 @@
-"""
-Hausa tweet sentiment – Gradio demo.
+﻿"""
+Hausa tweet sentiment â€“ Gradio demo.
 
 Models:
   1. Classical (main): word + character TF-IDF + calibrated LinearSVC (test macro-F1 0.782)
@@ -85,7 +85,7 @@ ENGLISH_MARKERS = {
 
 
 def domain_note(text: str) -> str:
-    tokens = re.findall(r"[a-zA-ZɓɗƙƴƁƊƘƳ']+", text.lower())
+    tokens = re.findall(r"[a-zA-ZÉ“É—Æ™Æ´ÆÆŠÆ˜Æ³']+", text.lower())
     if len(tokens) < 2:
         return "Input is very short; the prediction may be unreliable."
     h = sum(1 for t in tokens if t in HAUSA_MARKERS)
@@ -153,7 +153,7 @@ def _build_rnn_module(config: dict, vocab_size: int):
                 bidirectional=True,
                 dropout=dropout if num_layers > 1 else 0.0,
             )
-            # state_dict: attn.0 (256->64), attn.2 (64->1)  → Sequential Linear, Tanh, Linear
+            # state_dict: attn.0 (256->64), attn.2 (64->1)  â†’ Sequential Linear, Tanh, Linear
             self.attn = nn.Sequential(
                 nn.Linear(hidden * 2, 64),
                 nn.Tanh(),
@@ -257,7 +257,7 @@ def predict(text: str):
     note = domain_note(text)
     prepared = f"Text seen after cleaning: {bow}"
     if note:
-        prepared += f"\n\n⚠ {note}"
+        prepared += f"\n\nâš  {note}"
 
     # Classical
     c_probs = classical_predict_proba(bow)
@@ -295,7 +295,7 @@ def predict(text: str):
     if len(set(labels_seen)) == 1 and len(labels_seen) > 1:
         prepared += "\nAll loaded models agree."
     elif len(set(labels_seen)) > 1:
-        prepared += "\nModels disagree — treat the prediction as uncertain."
+        prepared += "\nModels disagree â€” treat the prediction as uncertain."
 
     return prepared, classical_out, rnn_out, transformer_out
 
@@ -313,7 +313,7 @@ Classifies Hausa social-media text as **positive**, **neutral** or **negative**.
 - **Transformer:** AfroXLMR-mini LoRA (test macro-F1 **0.590**) when files and libraries are present
 - Emoji and Hausa hooked letters are kept; links and @mentions are normalised
 - Sarcasm and subtle negation are not handled reliably
-- Trained on Hausa tweets — English or formal news prose may mislead the models
+- Trained on Hausa tweets â€” English or formal news prose may mislead the models
 """
 
 EXAMPLES = [
@@ -328,14 +328,14 @@ with gr.Blocks(title="Hausa Sentiment") as demo:
     box = gr.Textbox(
         label="Hausa text",
         lines=3,
-        placeholder="Rubuta ko manna tweet na Hausa a nan…",
+        placeholder="Rubuta ko manna tweet na Hausa a nanâ€¦",
     )
     btn = gr.Button("Classify", variant="primary")
     info = gr.Textbox(label="Prepared text and notes", interactive=False)
     with gr.Row():
-        classical_label = gr.Label(label="Classical model (main) — 0.782")
-        rnn_label = gr.Label(label="BiLSTM + attention — 0.746")
-        transformer_label = gr.Label(label="Transformer LoRA — 0.590")
+        classical_label = gr.Label(label="Classical model (main) â€” 0.782")
+        rnn_label = gr.Label(label="BiLSTM + attention â€” 0.746")
+        transformer_label = gr.Label(label="Transformer LoRA â€” 0.590")
     btn.click(
         predict,
         inputs=box,
@@ -345,4 +345,5 @@ with gr.Blocks(title="Hausa Sentiment") as demo:
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port, ssr_mode=False, show_error=True)
+    demo.launch(server_name="0.0.0.0", server_port=port, show_error=True)
+
