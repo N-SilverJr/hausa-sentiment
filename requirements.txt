@@ -1,7 +1,7 @@
-gradio>=4.0,<5
+﻿gradio>=4.44.0,<5
 scikit-learn
 joblib
 numpy
-# CPU-only PyTorch (smaller than default CUDA wheels)
+huggingface_hub>=0.23.0,<0.26.0
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch
